@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+import ipaddress
+import json
+import os
+import shutil
+import stat
+import sys
+from itertools import product
+
+import netifaces
+
+SUPPORTED_CERTS = {
+    "ssl_ca_file": "client.ca.cert.pem",
+    "ssl_cert_file": "server.cert.pem",
+    "ssl_key_file": "server.key.pem",
+}
+
+# Environmental configuration
+CERTS = json.loads(os.environ["CERTS"])
+CONF_EXTRA = os.environ["CONF_EXTRA"]
+LAN_AUTH_METHOD = os.environ["LAN_AUTH_METHOD"]
+LAN_CONNECTION = os.environ["LAN_CONNECTION"]
+LAN_DATABASES = json.loads(os.environ["LAN_DATABASES"])
+LAN_HBA_TPL = os.environ["LAN_HBA_TPL"]
+LAN_TLS = json.loads(os.environ["LAN_TLS"])
+LAN_USERS = json.loads(os.environ["LAN_USERS"])
+WAN_AUTH_METHOD = os.environ["WAN_AUTH_METHOD"]
+WAN_CONNECTION = os.environ["WAN_CONNECTION"]
+WAN_DATABASES = json.loads(os.environ["WAN_DATABASES"])
+WAN_HBA_TPL = os.environ["WAN_HBA_TPL"]
+WAN_TLS = json.loads(os.environ["WAN_TLS"])
+WAN_USERS = json.loads(os.environ["WAN_USERS"])
+
+# Configuration file templates
+CONF_FOLDER = "/etc/postgres"
+CONF_FILE = os.path.join(CONF_FOLDER, "postgresql.conf")
+CONF_TPL = """
+hba_file = '{conf_folder}/pg_hba.conf'
+listen_addresses = '*'
+{ssl_conf}
+{extra_conf}
+"""
+HBA_FILE = os.path.join(CONF_FOLDER, "pg_hba.conf")
+HBA_TPL = """
+# Permitir todas las conexiones locales por socket
+local all all trust
+local replication all trust
+
+# LAN/WAN configuraciones autogeneradas
+{extra_conf}
+"""
+WAN_CIDRS = ("0.0.0.0/0", "::0/0")
+
+# Configuration helpers
+hba_conf = []
+ssl_conf = []
+
+
+def permissions_fix(filename):
+    """Hacer que :param:`filename` sea propiedad del usuario root y del grupo postgres."""
+    shutil.chown(filename, "root", "postgres")
+    os.chmod(filename, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+
+
+# Configura TLS
+for key, filename in SUPPORTED_CERTS.items():
+    full_path = os.path.join(CONF_FOLDER, filename)
+    # Escribir en el archivo PEM si proviene de la variable env
+    if not os.path.exists(full_path) and CERTS.get(filename):
+        with open(full_path, "w") as cert_file:
+            cert_file.write(CERTS[filename])
+    if os.path.exists(full_path):
+        # Habilitar archivo en la configuración de postgres
+        ssl_conf.append("{} = '{}'".format(key, full_path))
+        permissions_fix(full_path)
+
+if ssl_conf:
+    ssl_conf.append("ssl = on")
+
+# Generar configuración de autenticación LAN
+for interface in netifaces.interfaces():
+    for type_, addresses in netifaces.ifaddresses(interface).items():
+        if type_ in {netifaces.AF_INET, netifaces.AF_INET6}:
+            for address in addresses:
+                try:
+                    # Formatee la interfaz IP y la máscara de red en notación CIDR común
+                    cidr = ipaddress.ip_network(
+                        "{addr}/{netmask}".format(**address), False
+                    )
+                except ValueError:
+                    continue
+                # Agregar una línea a pg_hba.conf, de acuerdo con la plantilla
+                for user, db in product(LAN_USERS, LAN_DATABASES):
+                    hba_conf.append(
+                        LAN_HBA_TPL.format(
+                            connection=LAN_CONNECTION,
+                            db=db,
+                            user=user,
+                            cidr=cidr,
+                            meth=LAN_AUTH_METHOD,
+                        )
+                    )
+
+# Generar configuración de autenticación WAN
+if WAN_CONNECTION != "hostssl" or ssl_conf:
+    for user, db, cidr in product(WAN_USERS, WAN_DATABASES, WAN_CIDRS):
+        hba_conf.append(
+            WAN_HBA_TPL.format(
+                connection=WAN_CONNECTION,
+                db=db,
+                user=user,
+                cidr=cidr,
+                meth=WAN_AUTH_METHOD,
+            )
+        )
+
+# Escribir en archivos de configuración de postgres
+with open(CONF_FILE, "w") as conf_file:
+    conf_file.write(
+        CONF_TPL.format(
+            conf_folder=CONF_FOLDER, ssl_conf="\n".join(ssl_conf), extra_conf=CONF_EXTRA
+        )
+    )
+permissions_fix(CONF_FILE)
+with open(HBA_FILE, "w") as conf_file:
+    conf_file.write(HBA_TPL.format(extra_conf="\n".join(hba_conf)))
+permissions_fix(HBA_FILE)
+
+# Continuar la ejecución normal
+args = sys.argv[1:]
+if not args or args[0] == "postgres" or args[0].startswith("-"):
+    # Need to go through parent image entrypoint, and hardcode conf file
+    args = [
+        "/usr/local/bin/docker-entrypoint.sh",
+        *args,
+        "-cconfig_file={}".format(CONF_FILE),
+    ]
+os.execvp(args[0], args)

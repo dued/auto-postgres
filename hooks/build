@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+from plumbum import FG, local
+from plumbum.cmd import date, docker
+
+# Verifique que las variables de entorno estén presentes
+DOCKER_TAG = local.env["DOCKER_TAG"]
+COMMIT = local.env.get("GIT_SHA1", local.env.get("TRAVIS_COMMIT"))
+DATE = date("--rfc-3339", "ns")
+
+# Construye imagen
+docker[
+    "image",
+    "build",
+    "--build-arg",
+    "VCS_REF={}".format(COMMIT),
+    "--build-arg",
+    "BUILD_DATE={}".format(DATE),
+    "--build-arg",
+    "BASE_TAG={}".format(DOCKER_TAG),
+    "--tag",
+    "dued/auto-postgres:{}".format(DOCKER_TAG),
+    ".",
+] & FG

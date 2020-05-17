@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# See https://www.postgresql.org/docs/current/ssl-tcp.html#SSL-CERTIFICATE-CREATION
+
+domain="${1:-ejemplo.com}"
+client_name="${2:-test_user}"
+
+### Certificados de servidor (para cifrar la conexión)
+
+# Generar solicitud de firma de certificado del servidor (CSR) y clave privada (PK)
+# para la Autoridad de Certificación (CA)
+openssl req -new -text -out server.ca.csr.pem -newkey rsa:4096 -nodes \
+    -keyout server.ca.key.pem -subj "/CN=server.ca.$domain"
+# Generar certificado de CA del servidor
+openssl x509 -req -in server.ca.csr.pem -text -days 3650 -extensions v3_ca \
+    -signkey server.ca.key.pem -out server.ca.cert.pem
+# Generar CSR del servidor y clave privada
+openssl req -new -nodes -text -out server.csr.pem -newkey rsa:4096 \
+    -keyout server.key.pem -subj "/CN=$domain"
+# Generar certificado de servidor firmado por la CA del servidor
+openssl x509 -req -in server.csr.pem -text -days 3650 \
+    -CA server.ca.cert.pem -CAkey server.ca.key.pem -CAcreateserial \
+    -out server.cert.pem
+
+### Certificados de cliente (para autenticación de certificado en lugar de contraseña)
+
+# Generar CSR y PK para CA de cliente
+openssl req -new -text -out client.ca.csr.pem -newkey rsa:4096 -nodes \
+    -keyout client.ca.key.pem -subj "/CN=client.ca.$domain"
+# Generar certificado de CA del cliente
+openssl x509 -req -in client.ca.csr.pem -text -days 3650 -extensions v3_ca \
+    -signkey client.ca.key.pem -out client.ca.cert.pem
+# Generar CSR del cliente y clave privada
+openssl req -new -nodes -text -out client.csr.pem -newkey rsa:4096 -nodes \
+    -keyout client.key.pem -subj "/CN=$client_name"
+# Generate client certificate signed by the client CA
+openssl x509 -req -in client.csr.pem -text -days 3650 \
+    -CA client.ca.cert.pem -CAkey client.ca.key.pem -CAcreateserial \
+    -out client.cert.pem
+
+### Toques finales
+
+# Arreglar permisos
+chmod u=rw,go= *.pem
+# Eliminar CSR, ya no es necesario
+rm *.csr.pem

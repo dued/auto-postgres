@@ -58,4 +58,4 @@ deploy:
   on:
     branch: master
     condition:
-      - $TRAVIS_BUILD_STAGE_NAME = Test
+      - $TRAVIS_BUILD_STAGE_NAME = test
